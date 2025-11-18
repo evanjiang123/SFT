@@ -24,7 +24,6 @@ from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     TrainingArguments,
 )
 from trl import SFTTrainer
@@ -166,26 +165,21 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     if torch.cuda.is_available():
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype="bfloat16",
-            bnb_4bit_quant_type="nf4",
-        )
         model = AutoModelForCausalLM.from_pretrained(
             args.base_model,
-            quantization_config=quant_config,
             device_map="auto",
             trust_remote_code=True,
         )
-    else:
-        if torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
+    elif torch.backends.mps.is_available():
         model = AutoModelForCausalLM.from_pretrained(
             args.base_model,
-            device_map=device,
+            device_map="mps",
+            trust_remote_code=True,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.base_model,
+            device_map="cpu",
             trust_remote_code=True,
         )
 
