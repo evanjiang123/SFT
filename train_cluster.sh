@@ -18,13 +18,13 @@ export HF_DATASETS_CACHE=$HF_HOME/datasets
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 
-LOCAL_ROOT=/localscratch/$SLURM_JOB_ID
+LOCAL_ROOT=${SLURM_TMPDIR}
 LOCAL_MODEL=$LOCAL_ROOT/Qwen2.5-7B-Instruct
 LOCAL_CLUSTER_FILE=$LOCAL_ROOT/cluster_${CLUSTER_ID}.jsonl
 LOCAL_OUTPUT=$LOCAL_ROOT/qwen_loras/cluster_${CLUSTER_ID}
 mkdir -p $LOCAL_ROOT/qwen_loras
 
-echo "Copying Qwen checkpoint to localscratch..."
+echo "Copying Qwen checkpoint to local scratch..."
 mkdir -p $LOCAL_ROOT
 cp -r /home/evan1/scratch/Multi_LLM_agent_trainning/.cache/huggingface/Qwen2.5-7B-Instruct $LOCAL_MODEL
 cp ${CLUSTER_FILE} $LOCAL_CLUSTER_FILE
