@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from datasets import Dataset, load_dataset
 from peft import LoraConfig, get_peft_model
@@ -51,6 +52,13 @@ def parse_args() -> argparse.Namespace:
         default="Qwen/Qwen2.5-7B-Instruct",
         help="Base causal LM checkpoint on Hugging Face.",
     )
+    parser.add_argument(
+        "--cluster-file",
+        type=Path,
+        default=None,
+        help="Optional path to a local cluster JSONL file. "
+        "If provided, the script loads data from this file instead of Hugging Face.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-epochs", type=float, default=3.0)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
@@ -65,8 +73,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_blueprint_cluster(cluster_id: int) -> Dataset:
-    """Loads the BluePrint 25-cluster dataset and filters to a given cluster."""
+def load_local_cluster(cluster_id: int, cluster_path: Path) -> Tuple[Dataset, Dataset]:
+    """Load a cluster from a local JSONL file."""
+    LOGGER.info("Loading cluster %s from %s", cluster_id, cluster_path)
+    rows: List[Dict[str, Any]] = []
+    with cluster_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+
+    if not rows:
+        raise ValueError(f"Cluster file {cluster_path} is empty.")
+    dataset = Dataset.from_list(rows)
+    if "thread" not in dataset.column_names:
+        raise ValueError(
+            f"Expected column 'thread' in cluster file {cluster_path}, found {dataset.column_names}"
+        )
+    LOGGER.info("Local cluster threads: %d", len(dataset))
+    split = dataset.train_test_split(test_size=0.1, seed=1234)
+    return split["train"], split["test"]
+
+
+def load_blueprint_cluster(cluster_id: int, cluster_file: Path | None = None) -> Tuple[
+    Dataset, Dataset
+]:
+    """Loads the BluePrint dataset, optionally from a local file."""
+    if cluster_file is not None:
+        return load_local_cluster(cluster_id, cluster_file)
+
     dataset = load_dataset("ComplexDataLab/BluePrint", "25_clusters", split="full")
     if "cluster_id" not in dataset.column_names or "thread" not in dataset.column_names:
         raise ValueError(
@@ -112,7 +148,9 @@ def main() -> None:
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    train_split, eval_split = load_blueprint_cluster(args.cluster_id)
+    train_split, eval_split = load_blueprint_cluster(
+        args.cluster_id, cluster_file=args.cluster_file
+    )
 
     train_dataset = build_text_dataset(train_split, args.cluster_id)
     eval_dataset = build_text_dataset(eval_split, args.cluster_id)
