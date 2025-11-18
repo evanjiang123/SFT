@@ -6,6 +6,8 @@
 #SBATCH --time=06:00:00
 #SBATCH --job-name=cluster-lora
 #SBATCH --output=%x-%j.out
+#SBATCH --mail-user=duoduo.jiang@mail.mcgill.ca
+#SBATCH --mail-type=END,FAIL
 
 module load python/3.11
 module load gcc/12.3 arrow/21.0.0
