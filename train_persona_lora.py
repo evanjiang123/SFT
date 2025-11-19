@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -31,6 +32,8 @@ import torch
 
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,10 +143,11 @@ def format_thread(thread: List[Dict[str, Any]], cluster_id: int) -> str:
 
 def build_text_dataset(dataset: Dataset, cluster_id: int) -> Dataset:
     LOGGER.info("Formatting %d threads into text", len(dataset))
-    formatted = dataset.map(
-        lambda row: {"text": format_thread(row["thread"], cluster_id)},
-        remove_columns=dataset.column_names,
-    )
+formatted = dataset.map(
+    lambda row: {"text": format_thread(row["thread"], cluster_id)},
+    remove_columns=dataset.column_names,
+    num_proc=1,
+)
     return formatted
 
 
