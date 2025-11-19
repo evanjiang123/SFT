@@ -91,8 +91,11 @@ def load_local_cluster(cluster_id: int, cluster_path: Path) -> Tuple[Dataset, Da
             f"Expected column 'thread' in cluster file {cluster_path}, found {dataset.column_names}"
         )
     LOGGER.info("Local cluster threads: %d", len(dataset))
-    split = dataset.train_test_split(test_size=0.1, seed=1234)
-    return split["train"], split["test"]
+    split = dataset.train_test_split(test_size=0.01, seed=1234)
+    eval_split = split["test"]
+    if len(eval_split) > 5000:
+        eval_split = eval_split.select(range(5000))
+    return split["train"], eval_split
 
 
 def load_blueprint_cluster(cluster_id: int, cluster_file: Path | None = None) -> Tuple[
