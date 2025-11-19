@@ -2,10 +2,11 @@
 #SBATCH --account=def-rrabba
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=40G
+#SBATCH --mem=120G
 #SBATCH --time=06:00:00
 #SBATCH --job-name=cluster-lora
 #SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
 #SBATCH --mail-user=duoduo.jiang@mail.mcgill.ca
 #SBATCH --mail-type=END,FAIL
 
