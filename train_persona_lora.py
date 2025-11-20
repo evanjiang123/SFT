@@ -287,7 +287,7 @@ def main() -> None:
     LOGGER.info("Initializing SFTTrainer...")
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,             # more standard than processing_class
+        processing_class=tokenizer,          # more standard than processing_class
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         args=training_args,
