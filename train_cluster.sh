@@ -50,8 +50,7 @@ python -u train_persona_lora.py \
   --cluster-id ${CLUSTER_ID} \
   --cluster-file $LOCAL_CLUSTER_FILE \
   --output-dir $LOCAL_OUTPUT \
-  --num-epochs 3 \
-  --packing
+  --num-epochs 3
 
 ###############################################
 # 4. Save results back to scratch
