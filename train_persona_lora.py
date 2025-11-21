@@ -4,7 +4,7 @@ Train a persona-specific LoRA adapter on the BluePrint dataset.
 
 Typical usage (run inside your HF-enabled virtual env):
 
-python agent-trainning/train_persona_lora.py \
+python agent_trainning/train_persona_lora.py \
   --cluster-id 7 \
   --cluster-file /path/to/cluster_7.jsonl \
   --output-dir /scratch/$USER/Qwen/Qwen2.5-7B-Instruct-lora-cluster07
@@ -30,8 +30,10 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     TrainingArguments,
+    Trainer,
+    default_data_collator,
 )
-from trl import SFTTrainer
+from accelerate import find_executable_batch_size
 import torch
 
 # Disable tokenizer multi-thread spam (HuggingFace warning + weird HPC behavior)
@@ -44,8 +46,12 @@ logging.basicConfig(
 LOGGER = logging.getLogger(__name__)
 
 # Line-buffered stdout/stderr so SLURM flushes messages promptly
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    # Older Python may not have reconfigure()
+    pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,20 +83,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-epochs", type=float, default=3.0)
-    parser.add_argument("--learning-rate", type=float, default=2e-4)
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--gradient-accumulation", type=int, default=8)
-    parser.add_argument("--max-seq-len", type=int, default=2048)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--eval-batch-size", type=int, default=4)
+    parser.add_argument("--gradient-accumulation", type=int, default=32)
     parser.add_argument(
         "--packing",
         action="store_true",
-        help="Enable SFTTrainer sequence packing.",
+        help="(Ignored) Kept for CLI compatibility; packing is not used in this script.",
     )
     parser.add_argument(
         "--dataset-num-proc",
         type=int,
         default=4,
-        help="Number of processes to use when SFTTrainer tokenizes the dataset.",
+        help="Number of processes to use when tokenizing the dataset.",
+    )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=512,
+        help="Maximum sequence length for tokenization.",
     )
     return parser.parse_args()
 
@@ -182,7 +194,7 @@ def build_text_dataset(dataset: Dataset, cluster_id: int) -> Dataset:
     formatted = dataset.map(
         lambda row: {"text": format_thread(row["thread"], cluster_id)},
         remove_columns=dataset.column_names,
-        num_proc=1,  # formatting is cheap, keep it simple
+        num_proc=1,  # formatting is cheap
     )
     LOGGER.info("Resulting text dataset has %d examples.", len(formatted))
     return formatted
@@ -212,100 +224,154 @@ def main() -> None:
     LOGGER.info("Loading tokenizer from base model: %s", args.base_model)
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model,
-        use_fast=True,          # faster + less memory overhead if supported
         trust_remote_code=True,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         LOGGER.info("Set pad_token to eos_token for tokenizer.")
 
-    tokenizer.model_max_length = args.max_seq_len
+    tokenizer.model_max_length = args.max_length
 
-    LOGGER.info("Loading base model: %s", args.base_model)
-    if torch.cuda.is_available():
-        LOGGER.info("CUDA is available. Using device_map='auto'.")
-        model = AutoModelForCausalLM.from_pretrained(
-            args.base_model,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-    elif torch.backends.mps.is_available():
-        LOGGER.info("Using MPS device (Apple Silicon).")
-        model = AutoModelForCausalLM.from_pretrained(
-            args.base_model,
-            device_map="mps",
-            trust_remote_code=True,
-        )
-    else:
-        LOGGER.info("No GPU detected. Using CPU. Training will be slow.")
-        model = AutoModelForCausalLM.from_pretrained(
-            args.base_model,
-            device_map="cpu",
-            trust_remote_code=True,
-        )
+    LOGGER.info("Tokenizing datasets with max_length=%d", args.max_length)
 
+    def tokenize_function(batch: Dict[str, List[str]]) -> Dict[str, Any]:
+        result = tokenizer(
+            batch["text"],
+            truncation=True,
+            padding="max_length",
+            max_length=args.max_length,
+        )
+        # For causal LM, labels are just input_ids
+        result["labels"] = result["input_ids"].copy()
+        return result
+
+    tokenized_train = train_dataset.map(
+        tokenize_function,
+        batched=True,
+        num_proc=args.dataset_num_proc,
+        remove_columns=["text"],
+    )
+    tokenized_eval = eval_dataset.map(
+        tokenize_function,
+        batched=True,
+        num_proc=args.dataset_num_proc,
+        remove_columns=["text"],
+    )
+
+    LOGGER.info("Loading base model in bfloat16: %s", args.base_model)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    LOGGER.info("Using device: %s", device)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        # you can optionally set cache_dir=os.environ.get("HF_HOME")
+    )
+
+    # LoRA config: similar to Aurélien's Qwen config
     if "qwen" in args.base_model.lower():
-        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+        target_modules = [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
     else:
         target_modules = ["c_attn", "c_proj"]
 
     LOGGER.info("Configuring LoRA with targets: %s", target_modules)
     lora_config = LoraConfig(
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.05,
+        r=32,
+        lora_alpha=64,
+        lora_dropout=0.1,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=target_modules,
     )
+
+    LOGGER.info("Wrapping base model with LoRA adapter...")
     model = get_peft_model(model, lora_config)
-    LOGGER.info("Wrapped base model with LoRA adapter.")
 
-    use_cuda = torch.cuda.is_available()
+    # Match Aurélien's safety tricks
+    try:
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+    except Exception as e:
+        LOGGER.warning("Could not enable input grads: %s", e)
 
-    training_args = TrainingArguments(
-        output_dir=str(output_path),
-        per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation,
-        gradient_checkpointing=True,
-        num_train_epochs=args.num_epochs,
-        learning_rate=args.learning_rate,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
-        logging_steps=10,
-        eval_strategy="steps",
-        eval_steps=200,
-        save_steps=200,
-        save_total_limit=3,
-        bf16=use_cuda,          # OK on A100/A40; will be ignored if unsupported
-        fp16=False,
-        weight_decay=0.0,
-        max_steps=-1,
-        report_to="none",
-        seed=args.seed,
-        dataloader_num_workers=2,
+    try:
+        if hasattr(model, "config"):
+            model.config.use_cache = False
+    except Exception as e:
+        LOGGER.warning("Could not set use_cache=False: %s", e)
+
+    try:
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+    except Exception as e:
+        LOGGER.warning("Could not enable gradient checkpointing: %s", e)
+
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    all_params = sum(p.numel() for p in model.parameters())
+    LOGGER.info(
+        "Trainable params (LoRA): %d / %d total",
+        trainable_params,
+        all_params,
     )
 
-    LOGGER.info("Initializing SFTTrainer...")
-    trainer = SFTTrainer(
-        model=model,
-        processing_class=tokenizer,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        args=training_args,
-    )
+    data_collator = default_data_collator
 
-    LOGGER.info("Starting training for cluster %s...", args.cluster_id)
-    trainer.train()
+    @find_executable_batch_size(starting_batch_size=args.batch_size)
+    def inner_training_loop(batch_size: int):
+        LOGGER.info("Using per_device_train_batch_size=%d", batch_size)
+        training_args = TrainingArguments(
+            output_dir=str(output_path),
+            per_device_train_batch_size=batch_size,
+            per_device_eval_batch_size=args.eval_batch_size,
+            eval_strategy="no",  # to match older transformers on CC
+            save_steps=500,
+            learning_rate=args.learning_rate,
+            warmup_steps=100,
+            num_train_epochs=args.num_epochs,
+            gradient_accumulation_steps=args.gradient_accumulation,
+            gradient_checkpointing=True,
+            bf16=True,  # A100 supports this
+            ddp_find_unused_parameters=False,
+            seed=args.seed,
+            logging_steps=50,
+        )
 
-    LOGGER.info("Saving final adapter and tokenizer to %s", output_path)
-    trainer.save_model(str(output_path))
-    tokenizer.save_pretrained(str(output_path / "tokenizer"))
-    LOGGER.info("Finished training cluster %s -> %s", args.cluster_id, output_path)
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_train,
+            eval_dataset=tokenized_eval,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+        )
+
+        LOGGER.info("Starting training for cluster %s...", args.cluster_id)
+        trainer.train()
+
+        LOGGER.info("Saving final adapter and tokenizer to %s", output_path)
+        trainer.save_model(str(output_path))
+        tokenizer.save_pretrained(str(output_path / "tokenizer"))
+        LOGGER.info(
+            "Finished training cluster %s -> %s",
+            args.cluster_id,
+            output_path,
+        )
+
+    inner_training_loop()
 
 
 if __name__ == "__main__":
     import traceback
+
     try:
         main()
     except Exception as e:
