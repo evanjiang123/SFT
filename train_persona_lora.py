@@ -332,7 +332,7 @@ def main() -> None:
             output_dir=str(output_path),
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=args.eval_batch_size,
-            eval_strategy="no",  # to match older transformers on CC
+            evaluation_strategy="no",  # older transformers use evaluation_strategy not eval_strategy
             save_steps=500,
             learning_rate=args.learning_rate,
             warmup_steps=100,
