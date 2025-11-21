@@ -340,7 +340,6 @@ def main() -> None:
             gradient_accumulation_steps=args.gradient_accumulation,
             gradient_checkpointing=True,
             bf16=True,  # A100 supports this
-            ddp_find_unused_parameters=False,
             seed=args.seed,
             logging_steps=50,
         )
