@@ -46,7 +46,7 @@ mkdir -p $LOCAL_ROOT/qwen_loras
 # 5. Extract the Qwen checkpoint
 #############################
 echo "Extracting Qwen checkpoint tarball to local scratch..."
-tar -xf /home/evan1/scratch/Multi_LLM_agent_trainning/.cache/huggingface/Qwen2.5-7B-Instruct.tar -C $LOCAL_ROOT
+tar -xf /home/evan1/scratch/Qwen2.5-7B-Instruct.tar -C $LOCAL_ROOT
 
 cp ${CLUSTER_FILE} $LOCAL_CLUSTER_FILE
 
