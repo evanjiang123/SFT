@@ -69,7 +69,7 @@ def parse_args():
 
 
 # ----------------------------- DATA LOADING -----------------------------
-MAX_TRAIN = 30000      # same as Aurélien
+MAX_TRAIN = 100000      # same as Aurélien
 MAX_EVAL = 5000        # same as Aurélien
 
 
